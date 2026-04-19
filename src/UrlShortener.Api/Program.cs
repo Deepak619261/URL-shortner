@@ -31,14 +31,16 @@ builder.Services.AddHttpClient<UrlSafetyChecker>();
 builder.Services.AddSingleton<CacheInvalidationBroker>();
 builder.Services.AddHostedService<CacheInvalidationSubscriber>();
 
-// JWT auth
+// JWT auth — construct AuthService inside the lambda so it picks up the FINAL
+// merged configuration (including any test-time IConfiguration overrides),
+// not the partially-merged configuration available at builder time.
 builder.Services.AddSingleton<AuthService>();
-var authServiceForSetup = new AuthService(builder.Configuration);
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(opts =>
     {
-        opts.TokenValidationParameters = authServiceForSetup.BuildValidationParams();
+        var auth = new AuthService(builder.Configuration);
+        opts.TokenValidationParameters = auth.BuildValidationParams();
     });
 builder.Services.AddAuthorization();
 
@@ -116,12 +118,17 @@ app.MapPost("/shorten", async (
     UrlSafetyChecker safety,
     ILogger<Program> log) =>
 {
-    // 0. Rate limit per IP (token bucket: 100 capacity, 10/sec refill)
-    var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    // 0. Rate limit — authenticated users get a HIGHER tier (500/50) keyed by user-id;
+    //    anonymous users get the standard tier (100/10) keyed by IP.
+    var rateLimitUserId = GetUserId(ctx);
+    var (rlKey, rlCapacity, rlRefill) = rateLimitUserId is long uid
+        ? ($"ratelimit:shorten:user:{uid}", 500, 50)
+        : ($"ratelimit:shorten:ip:{ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"}", 100, 10);
+
     var rl = await rateLimiter.CheckAsync(
-        key: $"ratelimit:shorten:{ip}",
-        capacity: 100,
-        refillPerSecond: 10);
+        key: rlKey,
+        capacity: rlCapacity,
+        refillPerSecond: rlRefill);
     if (!rl.Allowed)
     {
         var retryAfterSec = Math.Max(1, (int)((rl.RetryAfterMs + 999) / 1000));
@@ -333,3 +340,6 @@ record AnalyticsResponse(string Code, int TotalClicks, DateTime? LastClickedAt);
 record RegisterRequest(string Username, string Email, string Password);
 record LoginRequest(string Username, string Password);
 record AuthResponse(string Token, string Username, string Email);
+
+// Required so WebApplicationFactory<Program> in integration tests can find this entry point
+public partial class Program { }

@@ -227,7 +227,7 @@ Full reasoning in [tradeoffs.md](tradeoffs.md). Summary:
 - ✅ DELETE /{code} with JWT auth + ownership check + instant cache invalidation + Redis pub/sub broadcast
 - ✅ Async click logging (Channel + BackgroundService, batched bulk INSERT)
 - ✅ Graceful shutdown drains queue (no click loss on normal restarts)
-- ✅ Token bucket rate limiter (Redis Lua, per-IP)
+- ✅ Token bucket rate limiter (Redis Lua) — **tiered**: per-IP (100/10) for anonymous, per-user (500/50) for authenticated
 - ✅ GET /analytics/{code}
 - ✅ URL validation (scheme allowlist)
 - ✅ EF Core migrations
@@ -236,13 +236,14 @@ Full reasoning in [tradeoffs.md](tradeoffs.md). Summary:
 - ✅ GitHub Actions CI (build + test + Docker image)
 - ✅ JWT-based user accounts (register / login / ownership)
 - ✅ Distributed cache invalidation pattern (Redis pub/sub publisher + subscriber)
-- ✅ xUnit unit tests (32 tests covering CodeGenerator, CodeValidator, AuthService)
+- ✅ Testcontainers integration tests — real Postgres + Redis containers spun up per test run
+- ✅ xUnit test suite: **42 tests** (32 unit + 10 integration) — all passing
 
 ## What's NOT implemented (and why I'd add next)
 
-- **Per-user rate limit tiers** — current rate limit is per-IP regardless of auth. Authenticated users could get a higher per-user limit
-- **Integration tests with real Postgres + Redis** — current tests cover pure functions / utility classes. Would add Testcontainers for end-to-end tests that spin up real Postgres and Redis containers per test run
 - **Self-service deletion of anonymous codes** — codes created without auth (UserId = null) currently can't be deleted by anyone. Would add an admin role / API key for moderation cleanup
+- **Refresh tokens** — JWT TTL is 24h; would add refresh-token rotation for better security
+- **List-my-codes endpoint** — `GET /my/codes` for authenticated users to see what they've shortened
 
 ## Configuration
 
