@@ -94,6 +94,14 @@ curl -k -X POST https://localhost:7101/shorten \
   -d '{"longUrl": "https://example.com/some/path"}'
 ```
 
+Optional: provide your own slug via `customCode` (3–10 base62 chars, not a reserved word):
+
+```bash
+curl -k -X POST https://localhost:7101/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"longUrl": "https://example.com/promo", "customCode": "promo2026"}'
+```
+
 Response:
 ```json
 { "shortCode": "Iyldfko", "shortUrl": "https://localhost:7101/Iyldfko" }
@@ -102,9 +110,10 @@ Response:
 | Status | Meaning |
 |--------|---------|
 | 201 | Created |
-| 400 | Invalid URL (not http/https, too long, empty) |
+| 400 | Invalid URL (not http/https, too long, empty) OR invalid customCode (length / chars / reserved word) |
+| 409 | `customCode` already taken |
 | 429 | Rate limit exceeded (check `Retry-After` header) |
-| 500 | Could not generate unique code after 5 retries |
+| 500 | Could not generate unique random code after 5 retries |
 
 ### `GET /{code}`
 
@@ -122,6 +131,17 @@ curl -k -i https://localhost:7101/Iyldfko
 curl -k https://localhost:7101/analytics/Iyldfko
 # {"code":"Iyldfko","totalClicks":7,"lastClickedAt":"2026-04-19T16:12:26Z"}
 ```
+
+### `DELETE /{code}`
+
+Removes the mapping AND invalidates the Redis cache entry immediately (so a 404 is served right away, not after the 1-hour TTL).
+
+```bash
+curl -k -X DELETE https://localhost:7101/Iyldfko
+# HTTP 204 No Content (success), or 404 if code doesn't exist
+```
+
+> ⚠️ Currently unauthenticated. Production would require JWT auth + ownership check (Phase B).
 
 ### `GET /health`
 
@@ -146,7 +166,9 @@ Full reasoning in [tradeoffs.md](tradeoffs.md). Summary:
 ## What's implemented
 
 - ✅ POST /shorten with random base62 + retry on UNIQUE
+- ✅ POST /shorten with optional `customCode` (3–10 chars, base62, non-reserved)
 - ✅ GET /{code} with Redis cache-aside + 302
+- ✅ DELETE /{code} with instant cache invalidation
 - ✅ Async click logging (Channel + BackgroundService, batched bulk INSERT)
 - ✅ Graceful shutdown drains queue (no click loss on normal restarts)
 - ✅ Token bucket rate limiter (Redis Lua, per-IP)
@@ -154,12 +176,13 @@ Full reasoning in [tradeoffs.md](tradeoffs.md). Summary:
 - ✅ URL validation (scheme allowlist)
 - ✅ EF Core migrations
 - ✅ Docker Compose for local infra
+- ✅ Multi-stage Dockerfile for production deploys
+- ✅ GitHub Actions CI (build + test + Docker image)
+- ✅ xUnit unit tests for code generator + custom-code validator
 
 ## What's NOT implemented (and why I'd add next)
 
-- **User accounts / auth** — out of scope for portfolio. Would add JWT-based auth and per-user rate limit tier.
-- **Custom short codes** — users picking their own slugs (e.g., "promo2026"). Easy add: validate length, check existing.
-- **Malicious URL detection** — integrate Google Safe Browsing API before persisting.
-- **Cache eviction on URL deletion** — currently TTL-bounded (1h). For instant invalidation, publish a Redis pub/sub event.
-- **Production deployment** — Dockerfile + GitHub Actions CI not included. README focuses on local dev.
-- **Tests** — limited test coverage; would add xUnit + Testcontainers for integration tests.
+- **User accounts / auth** — would add JWT-based auth + per-user rate limit tier + ownership check on DELETE
+- **Malicious URL detection** — would call URLhaus API (free, no key) on POST to block known malware/phishing URLs before persisting
+- **Distributed cache invalidation** — current DELETE only invalidates the local Redis. With multiple Redis instances or app servers behind a CDN, would publish a Redis pub/sub event so all caches drop the entry simultaneously
+- **Integration tests** — current tests cover pure functions; would add Testcontainers for end-to-end tests against real Postgres + Redis

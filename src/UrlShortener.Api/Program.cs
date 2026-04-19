@@ -74,11 +74,39 @@ app.MapPost("/shorten", async (
         (parsedUri.Scheme != "http" && parsedUri.Scheme != "https"))
         return Results.BadRequest("Invalid URL — must be http or https");
 
-    // 2. Generate code + insert, retrying on UNIQUE collision
+    var clientIpForInsert = ctx.Connection.RemoteIpAddress?.ToString();
+
+    // 2a. Custom code path — caller supplied a slug
+    if (!string.IsNullOrWhiteSpace(req.CustomCode))
+    {
+        var (ok, error) = CodeValidator.Validate(req.CustomCode);
+        if (!ok) return Results.BadRequest(error);
+
+        var entity = new ShortCode
+        {
+            Code = req.CustomCode,
+            LongUrl = req.LongUrl,
+            CreatedByIp = clientIpForInsert,
+        };
+        db.ShortCodes.Add(entity);
+        try
+        {
+            await db.SaveChangesAsync();
+            var shortUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}/{req.CustomCode}";
+            return Results.Created($"/{req.CustomCode}", new ShortenResponse(req.CustomCode, shortUrl));
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: "23505" })
+        {
+            db.Entry(entity).State = EntityState.Detached;
+            return Results.Conflict($"Custom code '{req.CustomCode}' is already taken");
+        }
+    }
+
+    // 2b. Random code path — generate + insert, retrying on UNIQUE collision
     for (int attempt = 1; attempt <= MaxRetries; attempt++)
     {
         var code = CodeGenerator.Generate();
-        var clientIp = ctx.Connection.RemoteIpAddress?.ToString();
+        var clientIp = clientIpForInsert;
 
         var entity = new ShortCode
         {
@@ -176,9 +204,31 @@ app.MapGet("/analytics/{code}", async (string code, AppDbContext db) =>
     return Results.Ok(new AnalyticsResponse(code, totalClicks, lastClickedAt));
 });
 
+// DELETE removes the mapping AND invalidates the cache entry.
+// (No auth yet — Phase B will add JWT and lock this down to owner only.)
+app.MapDelete("/{code}", async (
+    string code,
+    AppDbContext db,
+    IConnectionMultiplexer redis,
+    ILogger<Program> log) =>
+{
+    var entry = await db.ShortCodes.FirstOrDefaultAsync(s => s.Code == code);
+    if (entry is null) return Results.NotFound();
+
+    db.ShortCodes.Remove(entry);
+    await db.SaveChangesAsync();
+
+    // Cache invalidation — drop the cached URL so a 404 is served immediately,
+    // not after the 1-hour TTL expires.
+    var removed = await redis.GetDatabase().KeyDeleteAsync($"url:{code}");
+    log.LogInformation("Deleted code {Code}, cache invalidated: {Removed}", code, removed);
+
+    return Results.NoContent();   // HTTP 204
+});
+
 app.Run();
 
 // DTOs (kept here since we have only a few endpoints)
-record ShortenRequest(string LongUrl);
+record ShortenRequest(string LongUrl, string? CustomCode = null);
 record ShortenResponse(string ShortCode, string ShortUrl);
 record AnalyticsResponse(string Code, int TotalClicks, DateTime? LastClickedAt);
