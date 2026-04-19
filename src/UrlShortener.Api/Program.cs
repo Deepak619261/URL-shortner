@@ -33,6 +33,10 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+// Serve static files from wwwroot/ (the minimal UI lives there)
+app.UseDefaultFiles();   // makes / serve index.html
+app.UseStaticFiles();    // serves any file under wwwroot/
+
 app.MapGet("/health", () => "OK");
 
 const int MaxRetries = 5;

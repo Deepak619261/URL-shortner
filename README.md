@@ -76,6 +76,8 @@ dotnet run --launch-profile https
 
 App listens on `https://localhost:7101` and `http://localhost:5292`.
 
+Open `https://localhost:7101/` in a browser for the **minimal UI** (single-page form to shorten URLs). API endpoints below also work directly via curl/Postman.
+
 > **Windows note:** if you have native Postgres installed, port 5432 will conflict. We mapped Docker Postgres to host port **5433** in `docker-compose.yml`.
 
 ---

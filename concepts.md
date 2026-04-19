@@ -268,3 +268,118 @@ why 5 retries -> collision odds are ~1 in millions (with 7-char base62 + low fil
 | GET /analytics/{code} | 200 OK | 404 (code doesn't exist) |
 
 **key gotcha -> 400 vs 404 confusion.** 400 = "your input is bad, fix it." 404 = "the thing you want doesn't exist on the server." totally different problems.
+
+---
+
+## 13. Docker basics
+
+docker = lightweight isolated containers (NOT virtual machines). they share the host kernel, so they're fast to start (seconds, not minutes) and tiny (MBs not GBs)
+
+5 key concepts ->
+| term | what it is | from our project |
+|---|---|---|
+| **image** | a blueprint / snapshot for a container | `postgres:16-alpine` (pulled from docker hub) |
+| **container** | a running instance of an image | `urlshortener-postgres` |
+| **volume** | persistent storage that survives container restart | `postgres_data:/var/lib/postgresql/data` |
+| **network** | how containers talk to each other / host | docker-compose auto-creates one |
+| **port mapping** | exposes a container port on the host machine | `5433:5432` (host:container) |
+
+mental model -> a container is like a "throwaway laptop inside your laptop", dedicated to running ONE program. throw it away whenever, your real machine is unchanged.
+
+key commands ->
+- `docker compose up -d` -> start everything in background
+- `docker compose down` -> stop + remove containers (KEEP volumes, data safe)
+- `docker compose down -v` -> stop + remove EVERYTHING including volumes (destroys data!)
+- `docker compose ps` -> list containers + health
+- `docker compose logs <service>` -> tail logs
+- `docker exec -it <name> bash` -> open shell INSIDE the running container
+
+multi-stage Dockerfile for production ->
+- **stage 1 (build)** -> use the full SDK image (~700MB), compile code with `dotnet publish`
+- **stage 2 (runtime)** -> use the lighter aspnet image (~200MB), copy ONLY the compiled output
+- final image is small + secure (no SDK shipped to prod)
+
+interview line -> *"docker keeps dev environments reproducible — every machine runs the same Postgres version with the same config via docker-compose. for production deploys, multi-stage builds give you small runtime images without dev tooling baked in"*
+
+---
+
+## 14. DI (Dependency Injection) + lifetimes
+
+DI in 1 sentence -> classes declare what they need (via constructor), framework provides it. no `new EmailSender(...)` hardcoded inside the class.
+
+without DI (BAD) ->
+```csharp
+public class OrderService
+{
+    private readonly EmailSender _emailer = new EmailSender("smtp.gmail.com");
+    // hardcoded, can't swap, can't test, can't change config
+}
+```
+
+with DI (GOOD) ->
+```csharp
+public class OrderService
+{
+    private readonly EmailSender _emailer;
+    public OrderService(EmailSender emailer) => _emailer = emailer;  // framework injects
+}
+```
+
+3 lifetimes (this is the interview question) ->
+| lifetime | when new instance created | when to use | from our project |
+|---|---|---|---|
+| **Singleton** | ONE for the entire app's lifetime | stateless, thread-safe, expensive to create | IConnectionMultiplexer (Redis), ClickQueue, RateLimiter |
+| **Scoped** | ONE per HTTP request | stateful per-request, wraps a transaction | AppDbContext (default for EF Core) |
+| **Transient** | NEW every time it's injected | cheap, stateless, lightweight | (we don't use any) |
+
+captive dependency gotcha (we hit this in ClickFlushService) ->
+- BackgroundService is SINGLETON
+- AppDbContext is SCOPED
+- if a singleton directly holds a scoped object → the scoped object lives forever (captive) → DB connections leak, memory grows
+
+fix ->
+- inject `IServiceScopeFactory` (safe — it's a singleton)
+- inside the loop, create a fresh scope each time, get DbContext from THAT scope
+```csharp
+using var scope = _scopeFactory.CreateScope();
+var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+// ... use db ...
+// scope disposed → connection returned to pool
+```
+this is THE standard pattern for using EF Core inside BackgroundService
+
+interview line -> *"anything thread-safe + expensive goes singleton. anything per-request / per-transaction goes scoped. you can never inject scoped directly into singleton — use IServiceScopeFactory and create a scope per work unit"*
+
+---
+
+## 15. Deployment with minimum effort (Render.com)
+
+easiest path for .NET + Postgres + Redis -> **render.com** (free tier, mostly UI clicks, github auto-deploy)
+
+prerequisite -> add a Dockerfile to your repo (multi-stage: SDK to build, aspnet runtime to ship)
+
+steps ->
+1. commit + push the Dockerfile to github
+2. render.com → sign up with github
+3. create managed PostgreSQL service (free tier) → copy "Internal Connection String"
+4. create managed Redis service (free tier) → copy "Internal Redis URL"
+5. create Web Service → connect github repo → render auto-detects Dockerfile
+6. add env vars (note the `__` double underscore = nested config in .NET):
+   - `ConnectionStrings__Postgres` = <postgres internal URL>
+   - `ConnectionStrings__Redis` = <redis internal URL>
+   - `ASPNETCORE_ENVIRONMENT` = Production
+7. deploy → public URL like `https://urlshortener.onrender.com`
+
+apply migrations on first deploy ->
+- open Render → your Web Service → Shell tab
+- run: `dotnet ef database update --connection "$ConnectionStrings__Postgres"`
+
+alternatives ->
+| platform | pros | cons |
+|---|---|---|
+| **Render** ⭐ | pure UI, free tier, managed PG+Redis | free tier sleeps after 15min idle |
+| **Fly.io** | great .NET, fast cold starts | requires CLI install (`fly launch`) |
+| **Railway** | polished UI | gets pricey past free tier |
+| **Azure Container Apps** | enterprise, integrates with Azure | needs Azure CLI |
+
+interview line -> *"deployed via Docker on Render with managed Postgres + Redis. multi-stage Dockerfile keeps final image ~250MB. connection strings injected as env vars — the `__` double underscore maps to nested config keys in .NET"*
