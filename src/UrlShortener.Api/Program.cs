@@ -291,6 +291,40 @@ app.MapGet("/analytics/{code}", async (string code, AppDbContext db) =>
     return Results.Ok(new AnalyticsResponse(code, totalClicks, lastClickedAt));
 });
 
+// Lists the authenticated user's codes, newest first, paginated.
+app.MapGet("/my/codes", async (
+    AppDbContext db,
+    HttpContext ctx,
+    int page = 1,
+    int pageSize = 20) =>
+{
+    var userId = GetUserId(ctx);
+    if (userId is null) return Results.Unauthorized();
+
+    page = Math.Max(1, page);
+    pageSize = Math.Clamp(pageSize, 1, 100);
+
+    var query = db.ShortCodes
+        .AsNoTracking()
+        .Where(s => s.UserId == userId);
+
+    var total = await query.CountAsync();
+
+    var rawItems = await query
+        .OrderByDescending(s => s.CreatedAt)
+        .Skip((page - 1) * pageSize)
+        .Take(pageSize)
+        .Select(s => new { s.Code, s.LongUrl, s.CreatedAt })
+        .ToListAsync();
+
+    var baseUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}";
+    var items = rawItems
+        .Select(s => new MyCodeItem(s.Code, $"{baseUrl}/{s.Code}", s.LongUrl, s.CreatedAt))
+        .ToList();
+
+    return Results.Ok(new MyCodesResponse(items, page, pageSize, total));
+}).RequireAuthorization();
+
 // DELETE removes the mapping AND invalidates the cache entry.
 // Requires JWT auth and the caller must be the owner of the code.
 app.MapDelete("/{code}", async (
@@ -340,6 +374,8 @@ record AnalyticsResponse(string Code, int TotalClicks, DateTime? LastClickedAt);
 record RegisterRequest(string Username, string Email, string Password);
 record LoginRequest(string Username, string Password);
 record AuthResponse(string Token, string Username, string Email);
+record MyCodeItem(string ShortCode, string ShortUrl, string LongUrl, DateTime CreatedAt);
+record MyCodesResponse(List<MyCodeItem> Items, int Page, int PageSize, int Total);
 
 // Required so WebApplicationFactory<Program> in integration tests can find this entry point
 public partial class Program { }

@@ -169,6 +169,30 @@ Validation: username 3–50 chars, valid email, password ≥ 8 chars.
 | 400 | Invalid input |
 | 409 | Username or email already taken |
 
+### `GET /my/codes`
+
+List all short codes the authenticated user has created. Newest first, paginated.
+
+```bash
+curl -k https://localhost:7101/my/codes?page=1&pageSize=20 \
+  -H "Authorization: Bearer <jwt>"
+# {
+#   "items": [
+#     { "shortCode": "aBc1234", "shortUrl": "https://localhost:7101/aBc1234",
+#       "longUrl": "https://example.com/foo", "createdAt": "2026-04-20T..." },
+#     ...
+#   ],
+#   "page": 1, "pageSize": 20, "total": 47
+# }
+```
+
+| Status | Meaning |
+|--------|---------|
+| 200 | Returns paginated list (empty `items` if user has no codes) |
+| 401 | No JWT |
+
+`pageSize` is clamped to 1–100. Default `page=1`, `pageSize=20`.
+
 ### `POST /auth/login`
 
 ```bash
@@ -237,13 +261,13 @@ Full reasoning in [tradeoffs.md](tradeoffs.md). Summary:
 - ✅ JWT-based user accounts (register / login / ownership)
 - ✅ Distributed cache invalidation pattern (Redis pub/sub publisher + subscriber)
 - ✅ Testcontainers integration tests — real Postgres + Redis containers spun up per test run
-- ✅ xUnit test suite: **42 tests** (32 unit + 10 integration) — all passing
+- ✅ GET /my/codes — paginated list of authenticated user's codes
+- ✅ xUnit test suite: **43 tests** (32 unit + 11 integration) — all passing
 
 ## What's NOT implemented (and why I'd add next)
 
 - **Self-service deletion of anonymous codes** — codes created without auth (UserId = null) currently can't be deleted by anyone. Would add an admin role / API key for moderation cleanup
-- **Refresh tokens** — JWT TTL is 24h; would add refresh-token rotation for better security
-- **List-my-codes endpoint** — `GET /my/codes` for authenticated users to see what they've shortened
+- **Refresh tokens** — JWT TTL is 24h; would add refresh-token rotation (with revocation) for better security
 
 ## Configuration
 

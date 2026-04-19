@@ -177,4 +177,46 @@ public class EndToEndTests
             new { username, password = "WRONG" });
         Assert.Equal(HttpStatusCode.Unauthorized, badLogin.StatusCode);
     }
+
+    [Fact]
+    public async Task My_codes_requires_auth_and_returns_only_callers_codes()
+    {
+        // Anonymous → 401
+        var anon = NewClient();
+        var unauth = await anon.GetAsync("/my/codes");
+        Assert.Equal(HttpStatusCode.Unauthorized, unauth.StatusCode);
+
+        // Register a user, create 3 codes
+        var client = NewClient();
+        var username = $"my{Guid.NewGuid().ToString("N")[..6]}";
+        var reg = await client.PostAsJsonAsync("/auth/register",
+            new { username, email = $"{username}@test.com", password = "password123" });
+        var token = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("token").GetString()!;
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        for (int i = 0; i < 3; i++)
+        {
+            await client.PostAsJsonAsync("/shorten",
+                new { longUrl = $"https://example.com/mine{i}" });
+        }
+
+        // Different user creates 1 code (should NOT show in our list)
+        var otherClient = NewClient();
+        var otherName = $"oth{Guid.NewGuid().ToString("N")[..6]}";
+        var otherReg = await otherClient.PostAsJsonAsync("/auth/register",
+            new { username = otherName, email = $"{otherName}@test.com", password = "password123" });
+        var otherToken = (await otherReg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("token").GetString()!;
+        otherClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", otherToken);
+        await otherClient.PostAsJsonAsync("/shorten",
+            new { longUrl = "https://example.com/not-mine" });
+
+        // GET /my/codes as the first user
+        var resp = await client.GetAsync("/my/codes");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(3, body.GetProperty("total").GetInt32());
+        Assert.Equal(3, body.GetProperty("items").GetArrayLength());
+    }
 }
