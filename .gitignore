@@ -1,0 +1,32 @@
+# .NET build output
+bin/
+obj/
+*.user
+*.suo
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.swp
+
+# JetBrains
+.idea/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit these
+appsettings.Production.json
+appsettings.Local.json
+*.pfx
+
+# Personal planning docs — keep these LOCAL only
+IDEA.md
+memory.md
+prompt.md
+
+# EF Core artifacts that should be tracked: Migrations/ folder (we WANT this committed)
