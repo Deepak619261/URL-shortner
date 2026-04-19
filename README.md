@@ -136,16 +136,71 @@ curl -k https://localhost:7101/analytics/Iyldfko
 
 Removes the mapping AND invalidates the Redis cache entry immediately (so a 404 is served right away, not after the 1-hour TTL).
 
+**Requires JWT auth and the caller must be the owner** (the user who created the code).
+
 ```bash
-curl -k -X DELETE https://localhost:7101/Iyldfko
-# HTTP 204 No Content (success), or 404 if code doesn't exist
+curl -k -X DELETE https://localhost:7101/Iyldfko \
+  -H "Authorization: Bearer <jwt>"
 ```
 
-> ⚠️ Currently unauthenticated. Production would require JWT auth + ownership check (Phase B).
+| Status | Meaning |
+|--------|---------|
+| 204 | Deleted (cache invalidated) |
+| 401 | No JWT / invalid JWT |
+| 403 | Authenticated but not the code's owner |
+| 404 | Code doesn't exist |
+
+### `POST /auth/register`
+
+Create a new user account. Returns a JWT.
+
+```bash
+curl -k -X POST https://localhost:7101/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"deepak","email":"deepak@x.com","password":"password123"}'
+# {"token":"eyJ...","username":"deepak","email":"deepak@x.com"}
+```
+
+Validation: username 3–50 chars, valid email, password ≥ 8 chars.
+
+| Status | Meaning |
+|--------|---------|
+| 201 | Created, JWT returned |
+| 400 | Invalid input |
+| 409 | Username or email already taken |
+
+### `POST /auth/login`
+
+```bash
+curl -k -X POST https://localhost:7101/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"deepak","password":"password123"}'
+# {"token":"eyJ...","username":"deepak","email":"deepak@x.com"}
+```
+
+| Status | Meaning |
+|--------|---------|
+| 200 | Token returned |
+| 401 | Bad credentials |
 
 ### `GET /health`
 
 Returns `OK` (200).
+
+---
+
+## Authentication
+
+The API supports optional JWT auth. Endpoints work in two modes:
+
+| Endpoint | Anonymous | Authenticated |
+|----------|-----------|---------------|
+| `POST /shorten` | ✅ works (`UserId = null` in DB) | ✅ ties code to user (for ownership) |
+| `GET /{code}` | ✅ public | ✅ public |
+| `GET /analytics/{code}` | ✅ public | ✅ public |
+| `DELETE /{code}` | ❌ 401 | ✅ if owner; 403 if not |
+
+JWT secret is configured in `appsettings.json` under `Jwt:Secret`. **For production, override with the `Jwt__Secret` environment variable** — never commit a real secret.
 
 ---
 

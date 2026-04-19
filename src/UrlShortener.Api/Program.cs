@@ -1,3 +1,5 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using StackExchange.Redis;
@@ -22,6 +24,17 @@ builder.Services.AddHostedService<ClickFlushService>();
 // Rate limiter (Redis-backed token bucket)
 builder.Services.AddSingleton<RateLimiter>();
 
+// JWT auth
+builder.Services.AddSingleton<AuthService>();
+var authServiceForSetup = new AuthService(builder.Configuration);
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(opts =>
+    {
+        opts.TokenValidationParameters = authServiceForSetup.BuildValidationParams();
+    });
+builder.Services.AddAuthorization();
+
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
@@ -37,7 +50,54 @@ app.UseHttpsRedirection();
 app.UseDefaultFiles();   // makes / serve index.html
 app.UseStaticFiles();    // serves any file under wwwroot/
 
+app.UseAuthentication();
+app.UseAuthorization();
+
 app.MapGet("/health", () => "OK");
+
+// ==== Auth endpoints ====
+
+app.MapPost("/auth/register", async (
+    RegisterRequest req,
+    AppDbContext db,
+    AuthService auth) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Username) || req.Username.Length < 3 || req.Username.Length > 50)
+        return Results.BadRequest("Username must be 3-50 characters");
+    if (string.IsNullOrWhiteSpace(req.Email) || !req.Email.Contains('@'))
+        return Results.BadRequest("Invalid email");
+    if (string.IsNullOrWhiteSpace(req.Password) || req.Password.Length < 8)
+        return Results.BadRequest("Password must be at least 8 characters");
+
+    if (await db.Users.AnyAsync(u => u.Username == req.Username))
+        return Results.Conflict("Username already taken");
+    if (await db.Users.AnyAsync(u => u.Email == req.Email))
+        return Results.Conflict("Email already registered");
+
+    var user = new User
+    {
+        Username = req.Username,
+        Email = req.Email,
+        PasswordHash = auth.HashPassword(req.Password),
+    };
+    db.Users.Add(user);
+    await db.SaveChangesAsync();
+
+    return Results.Created($"/auth/users/{user.Id}",
+        new AuthResponse(auth.GenerateToken(user), user.Username, user.Email));
+});
+
+app.MapPost("/auth/login", async (
+    LoginRequest req,
+    AppDbContext db,
+    AuthService auth) =>
+{
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Username == req.Username);
+    if (user is null || !auth.VerifyPassword(req.Password, user.PasswordHash))
+        return Results.Unauthorized();
+
+    return Results.Ok(new AuthResponse(auth.GenerateToken(user), user.Username, user.Email));
+});
 
 const int MaxRetries = 5;
 
@@ -75,6 +135,7 @@ app.MapPost("/shorten", async (
         return Results.BadRequest("Invalid URL — must be http or https");
 
     var clientIpForInsert = ctx.Connection.RemoteIpAddress?.ToString();
+    var userIdForInsert = GetUserId(ctx);  // null if not authenticated
 
     // 2a. Custom code path — caller supplied a slug
     if (!string.IsNullOrWhiteSpace(req.CustomCode))
@@ -87,6 +148,7 @@ app.MapPost("/shorten", async (
             Code = req.CustomCode,
             LongUrl = req.LongUrl,
             CreatedByIp = clientIpForInsert,
+            UserId = userIdForInsert,
         };
         db.ShortCodes.Add(entity);
         try
@@ -113,6 +175,7 @@ app.MapPost("/shorten", async (
             Code = code,
             LongUrl = req.LongUrl,
             CreatedByIp = clientIp,
+            UserId = userIdForInsert,
         };
 
         db.ShortCodes.Add(entity);
@@ -205,30 +268,47 @@ app.MapGet("/analytics/{code}", async (string code, AppDbContext db) =>
 });
 
 // DELETE removes the mapping AND invalidates the cache entry.
-// (No auth yet — Phase B will add JWT and lock this down to owner only.)
+// Requires JWT auth and the caller must be the owner of the code.
 app.MapDelete("/{code}", async (
     string code,
     AppDbContext db,
     IConnectionMultiplexer redis,
+    HttpContext ctx,
     ILogger<Program> log) =>
 {
+    var userId = GetUserId(ctx);
+    if (userId is null) return Results.Unauthorized();
+
     var entry = await db.ShortCodes.FirstOrDefaultAsync(s => s.Code == code);
     if (entry is null) return Results.NotFound();
+
+    if (entry.UserId != userId)
+        return Results.Forbid();   // 403 — authenticated but not the owner
 
     db.ShortCodes.Remove(entry);
     await db.SaveChangesAsync();
 
-    // Cache invalidation — drop the cached URL so a 404 is served immediately,
-    // not after the 1-hour TTL expires.
     var removed = await redis.GetDatabase().KeyDeleteAsync($"url:{code}");
-    log.LogInformation("Deleted code {Code}, cache invalidated: {Removed}", code, removed);
+    log.LogInformation("User {UserId} deleted code {Code}, cache invalidated: {Removed}",
+        userId, code, removed);
 
     return Results.NoContent();   // HTTP 204
-});
+}).RequireAuthorization();
 
 app.Run();
+
+// Helper: extracts the user ID from the JWT 'sub' claim, or null if anonymous
+static long? GetUserId(HttpContext ctx)
+{
+    var sub = ctx.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+              ?? ctx.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+    return long.TryParse(sub, out var id) ? id : null;
+}
 
 // DTOs (kept here since we have only a few endpoints)
 record ShortenRequest(string LongUrl, string? CustomCode = null);
 record ShortenResponse(string ShortCode, string ShortUrl);
 record AnalyticsResponse(string Code, int TotalClicks, DateTime? LastClickedAt);
+record RegisterRequest(string Username, string Email, string Password);
+record LoginRequest(string Username, string Password);
+record AuthResponse(string Token, string Username, string Email);
