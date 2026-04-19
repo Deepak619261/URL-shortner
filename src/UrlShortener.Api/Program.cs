@@ -24,6 +24,13 @@ builder.Services.AddHostedService<ClickFlushService>();
 // Rate limiter (Redis-backed token bucket)
 builder.Services.AddSingleton<RateLimiter>();
 
+// URL safety check (URLhaus). HttpClient pooled via factory.
+builder.Services.AddHttpClient<UrlSafetyChecker>();
+
+// Cache invalidation pub/sub
+builder.Services.AddSingleton<CacheInvalidationBroker>();
+builder.Services.AddHostedService<CacheInvalidationSubscriber>();
+
 // JWT auth
 builder.Services.AddSingleton<AuthService>();
 var authServiceForSetup = new AuthService(builder.Configuration);
@@ -106,6 +113,7 @@ app.MapPost("/shorten", async (
     AppDbContext db,
     HttpContext ctx,
     RateLimiter rateLimiter,
+    UrlSafetyChecker safety,
     ILogger<Program> log) =>
 {
     // 0. Rate limit per IP (token bucket: 100 capacity, 10/sec refill)
@@ -133,6 +141,15 @@ app.MapPost("/shorten", async (
     if (!Uri.TryCreate(req.LongUrl, UriKind.Absolute, out var parsedUri) ||
         (parsedUri.Scheme != "http" && parsedUri.Scheme != "https"))
         return Results.BadRequest("Invalid URL — must be http or https");
+
+    // 1b. Malicious URL check (URLhaus). Fail-open if URLhaus is down.
+    var safetyResult = await safety.CheckAsync(req.LongUrl);
+    if (!safetyResult.IsSafe)
+    {
+        log.LogWarning("Blocked malicious URL submission: {Url} (threat: {Threat})",
+            req.LongUrl, safetyResult.ThreatType);
+        return Results.BadRequest($"URL flagged as malicious by URLhaus (threat: {safetyResult.ThreatType})");
+    }
 
     var clientIpForInsert = ctx.Connection.RemoteIpAddress?.ToString();
     var userIdForInsert = GetUserId(ctx);  // null if not authenticated
@@ -273,6 +290,7 @@ app.MapDelete("/{code}", async (
     string code,
     AppDbContext db,
     IConnectionMultiplexer redis,
+    CacheInvalidationBroker broker,
     HttpContext ctx,
     ILogger<Program> log) =>
 {
@@ -291,6 +309,9 @@ app.MapDelete("/{code}", async (
     var removed = await redis.GetDatabase().KeyDeleteAsync($"url:{code}");
     log.LogInformation("User {UserId} deleted code {Code}, cache invalidated: {Removed}",
         userId, code, removed);
+
+    // Broadcast invalidation to any other subscribers (multi-region, in-process caches, audit, etc.)
+    await broker.PublishInvalidationAsync(code);
 
     return Results.NoContent();   // HTTP 204
 }).RequireAuthorization();

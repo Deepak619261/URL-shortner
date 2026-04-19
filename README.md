@@ -222,8 +222,9 @@ Full reasoning in [tradeoffs.md](tradeoffs.md). Summary:
 
 - ✅ POST /shorten with random base62 + retry on UNIQUE
 - ✅ POST /shorten with optional `customCode` (3–10 chars, base62, non-reserved)
+- ✅ POST /shorten checks URLhaus for known malicious URLs before persisting (fail-open if URLhaus is down)
 - ✅ GET /{code} with Redis cache-aside + 302
-- ✅ DELETE /{code} with instant cache invalidation
+- ✅ DELETE /{code} with JWT auth + ownership check + instant cache invalidation + Redis pub/sub broadcast
 - ✅ Async click logging (Channel + BackgroundService, batched bulk INSERT)
 - ✅ Graceful shutdown drains queue (no click loss on normal restarts)
 - ✅ Token bucket rate limiter (Redis Lua, per-IP)
@@ -233,11 +234,31 @@ Full reasoning in [tradeoffs.md](tradeoffs.md). Summary:
 - ✅ Docker Compose for local infra
 - ✅ Multi-stage Dockerfile for production deploys
 - ✅ GitHub Actions CI (build + test + Docker image)
-- ✅ xUnit unit tests for code generator + custom-code validator
+- ✅ JWT-based user accounts (register / login / ownership)
+- ✅ Distributed cache invalidation pattern (Redis pub/sub publisher + subscriber)
+- ✅ xUnit unit tests (32 tests covering CodeGenerator, CodeValidator, AuthService)
 
 ## What's NOT implemented (and why I'd add next)
 
-- **User accounts / auth** — would add JWT-based auth + per-user rate limit tier + ownership check on DELETE
-- **Malicious URL detection** — would call URLhaus API (free, no key) on POST to block known malware/phishing URLs before persisting
-- **Distributed cache invalidation** — current DELETE only invalidates the local Redis. With multiple Redis instances or app servers behind a CDN, would publish a Redis pub/sub event so all caches drop the entry simultaneously
-- **Integration tests** — current tests cover pure functions; would add Testcontainers for end-to-end tests against real Postgres + Redis
+- **Per-user rate limit tiers** — current rate limit is per-IP regardless of auth. Authenticated users could get a higher per-user limit
+- **Integration tests with real Postgres + Redis** — current tests cover pure functions / utility classes. Would add Testcontainers for end-to-end tests that spin up real Postgres and Redis containers per test run
+- **Self-service deletion of anonymous codes** — codes created without auth (UserId = null) currently can't be deleted by anyone. Would add an admin role / API key for moderation cleanup
+
+## Configuration
+
+### URLhaus Auth-Key
+
+URLhaus (the malicious URL check) requires a free Auth-Key. Without it, all checks fail-open (URL is allowed through with a warning logged).
+
+1. Register a free key at **https://auth.abuse.ch/**
+2. Set the key:
+   - **Local dev:** `appsettings.Development.json` → `"UrlHaus": { "AuthKey": "..." }`
+   - **Production:** `UrlHaus__AuthKey` env var (the `__` maps to nested config)
+
+### JWT secret
+
+For production, override `Jwt:Secret` with the `Jwt__Secret` env var. Generate a 32+ char random string:
+
+```bash
+openssl rand -base64 48
+```
